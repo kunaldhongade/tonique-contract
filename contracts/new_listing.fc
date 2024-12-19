@@ -1,118 +1,373 @@
+;; #include "imports/stdlib.fc";
+
+;; ;; Operation codes using string literals
+;; const op::lock_funds = "op::lock_funds"c;
+;; const op::request_refund = "op::request_refund"c;
+;; const op::deduct_funds = "op::deduct_funds"c;
+;; const op::register_restaurant = "op::register_restaurant"c;
+
+;; ;; Constants
+;; const int LOCK_PERIOD = 604800;  ;; 7 days in seconds
+;; const int MIN_TON = 1000000000;  ;; Minimum 1 TON for listing
+
+;; ;; Error codes
+;; const int error::deposit_too_low = 101;
+;; const int error::not_restaurant = 102;
+;; const int error::insufficient_balance = 103;
+;; const int error::lock_expired = 104;
+;; const int error::unauthorized = 105;
+;; const int error::unknown_op = 0xFFFF;
+
+;; ;; Global variables
+;; global cell deposits;
+;; global cell restaurants;
+
+;; () load_data() impure {
+;;     var ds = get_data().begin_parse();
+;;     deposits = ds~load_dict();
+;;     restaurants = ds~load_dict();
+;;     ds.end_parse();
+;; }
+
+;; () save_data() impure {
+;;     set_data(begin_cell()
+;;         .store_dict(deposits)
+;;         .store_dict(restaurants)
+;;         .end_cell());
+;; }
+
+;; (int, int) get_deposit_info(slice address) {
+;;     (slice value, int found?) = deposits.udict_get?(267, slice_hash(address));
+;;     if (found?) {
+;;         return (value~load_coins(), value~load_uint(64));
+;;     }
+;;     return (0, 0);
+;; }
+
+;; () update_deposit(slice address, int balance, int expiry) impure {
+;;     deposits~udict_set_builder(267, slice_hash(address),
+;;         begin_cell()
+;;             .store_coins(balance)
+;;             .store_uint(expiry, 64));
+;; }
+
+;; int is_restaurant(slice address) inline {
+;;     (slice value, int found?) = restaurants.udict_get?(267, slice_hash(address));
+;;     return found?;
+;; }
+
+;; () register_restaurant(slice address) impure {
+;;     restaurants~udict_set_builder(267, slice_hash(address),
+;;         begin_cell().store_uint(1, 1));
+;; }
+
+;; () send_tons(slice to_address, int amount) impure {
+;;     var msg = begin_cell()
+;;         .store_uint(0x10, 6)           ;; nobounce
+;;         .store_slice(to_address)
+;;         .store_coins(amount)
+;;         .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+;;         .end_cell();
+;;     send_raw_message(msg, 1);
+;; }
+
+;; () check_auto_refund(slice address) impure {
+;;     var (balance, expiry) = get_deposit_info(address);
+;;     if (balance > 0) {
+;;         if (now() >= expiry) {
+;;             send_tons(address, balance);
+;;             update_deposit(address, 0, 0);
+;;             save_data();
+;;         }
+;;     }
+;; }
+
+;; () recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+;;     if (in_msg_body.slice_empty?()) { return (); }
+    
+;;     slice cs = in_msg_full.begin_parse();
+;;     int flags = cs~load_uint(4);
+;;     if (flags & 1) { return (); }
+    
+;;     load_data();
+;;     slice sender_address = cs~load_msg_addr();
+    
+;;     ;; Check auto refund first
+;;     check_auto_refund(sender_address);
+    
+;;     int op = in_msg_body~load_uint(32);
+;;     int query_id = in_msg_body~load_uint(64);
+    
+;;     if (op == op::lock_funds) {
+;;         throw_unless(error::deposit_too_low, msg_value >= MIN_TON);
+        
+;;         var (current_balance, current_expiry) = get_deposit_info(sender_address);
+;;         int new_balance = current_balance + msg_value;
+;;         int new_expiry = max(now() + LOCK_PERIOD, current_expiry);
+        
+;;         update_deposit(sender_address, new_balance, new_expiry);
+;;         save_data();
+;;         return ();
+;;     }
+    
+;;     if (op == op::register_restaurant) {
+;;         register_restaurant(sender_address);
+;;         save_data();
+;;         return ();
+;;     }
+    
+;;     if (op == op::request_refund) {
+;;         var (balance, expiry) = get_deposit_info(sender_address);
+;;         throw_unless(error::insufficient_balance, balance > 0);
+        
+;;         send_tons(sender_address, balance);
+;;         update_deposit(sender_address, 0, 0);
+;;         save_data();
+;;         return ();
+;;     }
+    
+;;     if (op == op::deduct_funds) {
+;;         throw_unless(error::not_restaurant, is_restaurant(sender_address));
+        
+;;         slice customer_address = in_msg_body~load_msg_addr();
+;;         int deduct_amount = in_msg_body~load_coins();
+        
+;;         var (balance, expiry) = get_deposit_info(customer_address);
+;;         throw_unless(error::insufficient_balance, balance >= deduct_amount);
+;;         throw_unless(error::lock_expired, now() < expiry);
+        
+;;         send_tons(sender_address, deduct_amount);
+;;         update_deposit(customer_address, balance - deduct_amount, expiry);
+;;         save_data();
+;;         return ();
+;;     }
+    
+;;     throw(error::unknown_op);
+;; }
+
+;; ;; Get methods
+;; (int, int) get_user_deposit(slice address) method_id {
+;;     load_data();
+;;     return get_deposit_info(address);
+;; }
+
+;; int is_registered_restaurant(slice address) method_id {
+;;     load_data();
+;;     return is_restaurant(address);
+;; }
+
+;; int get_min_deposit() method_id {
+;;     return MIN_TON;
+;; }
+
+;; int get_remaining_time(slice address) method_id {
+;;     load_data();
+;;     var (_, expiry) = get_deposit_info(address);
+;;     if (now() >= expiry) {
+;;         return 0;
+;;     }
+;;     return expiry - now();
+;; }
+
+
+
 #include "imports/stdlib.fc";
 
-const op::lock_funds = "op::lock_funds"c;      ;; Lock funds for a specific period
-const op::request_refund = "op::request_refund"c; ;; Request refund before expiry
-const op::process_refund = "op::process_refund"c; ;; Process refund if requested
-const op::deduct_funds = "op::deduct_funds"c;  ;; Deduct funds for restaurant payment
+;; Operation Codes
+const op::deposit_budget = 0x44657020;   ;; "Dep "
+const op::register_restaurant = 0x52676973; ;; "Rgis"
+const op::deduct_payment = 0x44647563;    ;; "Dduc"
+const op::request_refund = 0x52656620;    ;; "Ref "
 
-;; Storage variables
-global int ctx_locked_balance;     ;; Locked TON balance
-global int ctx_lock_expiry;        ;; Expiry timestamp
-global int ctx_refund_requested;   ;; Refund status: 0 (no), 1 (requested)
+;; Constants
+const int LOCK_PERIOD = 604800;  ;; 7 days in seconds
+const int MIN_DEPOSIT = 1000000000;  ;; Minimum 1 TON
+const int STORAGE_FEE = 50000000;    ;; 0.05 TON for storage
 
-;; Load persistent storage variables
+;; Errors
+const int error::low_deposit = 101;
+const int error::not_restaurant = 102;
+const int error::insufficient_funds = 103;
+const int error::expired = 104;
+const int error::not_owner = 105;
+
+;; Storage Variables
+global cell user_deposits;    ;; HashmapE(267, ^UserDeposit)
+global cell restaurants;      ;; HashmapE(267, ^Restaurant)
+
+;; Load storage
 () load_data() impure {
     var ds = get_data().begin_parse();
-
-    ctx_locked_balance = ds~load_coins(); ;; Load locked TON balance
-    ctx_lock_expiry = ds~load_uint(64);   ;; Load lock expiry time
-    ctx_refund_requested = ds~load_uint(1); ;; Load refund status (0 or 1)
-
+    user_deposits = ds~load_dict();
+    restaurants = ds~load_dict();
     ds.end_parse();
 }
 
-;; Save persistent storage variables
+;; Save storage
 () save_data() impure {
-    set_data(
-        begin_cell()
-            .store_coins(ctx_locked_balance)
-            .store_uint(ctx_lock_expiry, 64)
-            .store_uint(ctx_refund_requested, 1)
-            .end_cell()
-    );
+    set_data(begin_cell()
+        .store_dict(user_deposits)
+        .store_dict(restaurants)
+        .end_cell());
 }
 
-;; Main function for receiving messages
-() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
-    if (in_msg_body.slice_empty?()) { return (); } ;; Ignore empty messages
+;; Get user deposit info
+(int, int) get_deposit_info(slice address) {
+    (slice value, int found?) = user_deposits.udict_get?(267, slice_hash(address));
+    if (found?) {
+        return (value~load_coins(), value~load_uint(64));
+    }
+    return (0, 0);
+}
 
+;; Update user deposit
+() update_deposit(slice address, int amount, int expiry) impure {
+    user_deposits~udict_set_builder(267, slice_hash(address),
+        begin_cell()
+            .store_coins(amount)
+            .store_uint(expiry, 64));
+}
+
+;; Check if restaurant is registered
+int is_restaurant(slice address) inline {
+    (slice value, int found?) = restaurants.udict_get?(267, slice_hash(address));
+    return found?;
+}
+
+;; Register new restaurant
+() register_restaurant(slice address) impure {
+    restaurants~udict_set_builder(267, slice_hash(address),
+        begin_cell().store_uint(1, 1));
+}
+
+;; Send TON to address
+() send_tons(slice to_address, int amount) impure {
+    var msg = begin_cell()
+        .store_uint(0x10, 6)
+        .store_slice(to_address)
+        .store_coins(amount)
+        .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+        .end_cell();
+    send_raw_message(msg, 1);
+}
+
+;; Process automatic refund if expired
+() process_auto_refund(slice address) impure {
+    var (balance, expiry) = get_deposit_info(address);
+    if (balance > 0) {
+        if (now() >= expiry) {
+            ;; Send full balance back to user
+            send_tons(address, balance - STORAGE_FEE);
+            ;; Reset deposit
+            update_deposit(address, 0, 0);
+            save_data();
+        }
+    }
+}
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) { return (); }
+    
     slice cs = in_msg_full.begin_parse();
     int flags = cs~load_uint(4);
-    if (flags & 1) { return (); } ;; Ignore bounced messages
-
-    load_data(); ;; Load storage variables into memory
-
-    int op = in_msg_body~load_uint(32); ;; Operation code (first 32 bits)
-    int query_id = in_msg_body~load_uint(64); ;; Query ID (next 64 bits, optional)
-
-    ;; Handle different operations
-    if (op == op::lock_funds) {
-        ;; Lock funds
-        int lock_amount = in_msg_body~load_coins(); ;; Amount to lock
-        int lock_period = in_msg_body~load_uint(32); ;; Period in seconds
-
-        ctx_locked_balance += lock_amount; ;; Add to locked balance
-        ctx_lock_expiry = now() + lock_period; ;; Set lock expiry
-        ctx_refund_requested = 0; ;; Reset refund request status
-        save_data(); ;; Persist changes
-        return ();
-    } if (op == op::request_refund) {
-        ;; Request refund
-        if (now() >= ctx_lock_expiry) { ;; If lock expired, auto-refund
-            send_raw_message(
-                begin_cell().store_coins(ctx_locked_balance).end_cell(),
-                0
-            );
-            ctx_locked_balance = 0; ;; Reset locked balance
-            ctx_refund_requested = 0; ;; Reset refund status
-        } else {
-            ctx_refund_requested = 1; ;; Mark refund as requested
-        }
-        save_data(); ;; Persist changes
-        return ();
-    } if (op == op::process_refund) {
-        ;; Process refund if requested
-        if (ctx_refund_requested == 1) {
-            send_raw_message(
-                begin_cell().store_coins(ctx_locked_balance).end_cell(),
-                0
-            );
-            ctx_locked_balance = 0; ;; Reset locked balance
-            ctx_refund_requested = 0; ;; Reset refund status
-        }
-        save_data(); ;; Persist changes
-        return ();
-    } if (op == op::deduct_funds) {
-        ;; Deduct funds for restaurant payment
-        int deduct_amount = in_msg_body~load_coins(); ;; Amount to deduct
-        if (deduct_amount > ctx_locked_balance) {
-            throw(0xff01); ;; Error: Insufficient balance
-        }
-
-        ctx_locked_balance -= deduct_amount; ;; Deduct amount from balance
-        send_raw_message(
-            begin_cell().store_coins(deduct_amount).end_cell(),
-            0
-        );
-        save_data(); ;; Persist changes
+    if (flags & 1) { return (); }
+    
+    load_data();
+    slice sender_address = cs~load_msg_addr();
+    
+    ;; Always check for auto refund
+    process_auto_refund(sender_address);
+    
+    int op = in_msg_body~load_uint(32);
+    int query_id = in_msg_body~load_uint(64);
+    
+    ;; Handle deposit budget
+    if (op == op::deposit_budget) {
+        ;; Check minimum deposit
+        throw_unless(error::low_deposit, msg_value >= MIN_DEPOSIT);
+        
+        ;; Update or create new deposit
+        var (current_balance, current_expiry) = get_deposit_info(sender_address);
+        int new_balance = current_balance + msg_value;
+        int new_expiry = max(now() + LOCK_PERIOD, current_expiry);
+        
+        update_deposit(sender_address, new_balance, new_expiry);
+        save_data();
         return ();
     }
-
-    throw(0xffff); ;; Unknown operation
+    
+    ;; Handle restaurant registration
+    if (op == op::register_restaurant) {
+        register_restaurant(sender_address);
+        save_data();
+        return ();
+    }
+    
+    ;; Handle payment deduction
+    if (op == op::deduct_payment) {
+        ;; Verify restaurant
+        throw_unless(error::not_restaurant, is_restaurant(sender_address));
+        
+        ;; Get customer address and amount
+        slice customer_address = in_msg_body~load_msg_addr();
+        int deduct_amount = in_msg_body~load_coins();
+        
+        ;; Check customer deposit
+        var (balance, expiry) = get_deposit_info(customer_address);
+        throw_unless(error::insufficient_funds, balance >= deduct_amount);
+        throw_unless(error::expired, now() < expiry);
+        
+        ;; Process payment
+        send_tons(sender_address, deduct_amount - STORAGE_FEE);
+        
+        ;; Update customer balance
+        int remaining = balance - deduct_amount;
+        if (remaining > 0) {
+            ;; Return remaining balance to customer
+            send_tons(customer_address, remaining - STORAGE_FEE);
+        }
+        
+        ;; Clear deposit
+        update_deposit(customer_address, 0, 0);
+        save_data();
+        return ();
+    }
+    
+    ;; Handle manual refund request
+    if (op == op::request_refund) {
+        var (balance, expiry) = get_deposit_info(sender_address);
+        throw_unless(error::insufficient_funds, balance > 0);
+        
+        ;; Process refund
+        send_tons(sender_address, balance - STORAGE_FEE);
+        update_deposit(sender_address, 0, 0);
+        save_data();
+        return ();
+    }
+    
+    throw(0xFFFF);
 }
 
-;; Getter methods for data retrieval
-int get_locked_balance() method_id {
+;; Getter Methods
+(int, int) get_user_deposit(slice address) method_id {
     load_data();
-    return ctx_locked_balance;
+    return get_deposit_info(address);
 }
 
-int get_lock_expiry() method_id {
+int is_registered_restaurant(slice address) method_id {
     load_data();
-    return ctx_lock_expiry;
+    return is_restaurant(address);
 }
 
-int is_refund_requested() method_id {
+int get_min_deposit() method_id {
+    return MIN_DEPOSIT;
+}
+
+int get_remaining_time(slice address) method_id {
     load_data();
-    return ctx_refund_requested;
+    var (_, expiry) = get_deposit_info(address);
+    if (now() >= expiry) {
+        return 0;
+    }
+    return expiry - now();
 }
